@@ -8,6 +8,10 @@
 
     pnpm install
 
+建立快取（`Redis`）
+
+    pnpm docker-init
+
 啟動 API
 
     pnpm start
