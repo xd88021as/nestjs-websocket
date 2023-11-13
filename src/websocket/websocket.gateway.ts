@@ -7,19 +7,21 @@ import {
   SubscribeMessage,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { io, Socket as ClientSocket } from 'socket.io-client';
+import { BitstampService } from 'src/bitstamp/bitstamp.service';
+import * as WebSocket from 'ws';
 @WebSocketGateway({ namespace: '/streaming' })
 export class WebsocketGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   @WebSocketServer()
-  server: Server;
-  private bitstampSocket: ClientSocket;
+  private server: Server;
+  private socket: WebSocket;
+  constructor(private readonly bitstampService: BitstampService) {}
 
   afterInit() {
-    this.bitstampSocket = io('wss://ws.bitstamp.net');
-    this.bitstampSocket.on('connect', () => {
-      const currencyPairs = [
+    this.socket = new WebSocket('wss://ws.bitstamp.net');
+    this.socket.on('open', () => {
+      [
         'btcusd',
         'btceur',
         'ethusd',
@@ -30,12 +32,22 @@ export class WebsocketGateway
         'ltceur',
         'ltcgbp',
         'xrpusd',
-      ];
-      currencyPairs.forEach((pair) => {
-        this.bitstampSocket.emit('bts:subscribe', {
-          channel: `live_trades_${pair}`,
-        });
+      ].forEach((pair) => {
+        const subscribeMessage = {
+          event: 'bts:subscribe',
+          data: {
+            channel: `live_trades_${pair}`,
+          },
+        };
+        this.socket.send(JSON.stringify(subscribeMessage));
       });
+    });
+    this.socket.on('message', async (data) => {
+      const message = JSON.parse(data);
+      if (message.data.price) {
+        const parts = message.channel.split('_');
+        await this.bitstampService.setOHLC(parts[2], message.data.price);
+      }
     });
   }
 
@@ -47,11 +59,26 @@ export class WebsocketGateway
     console.log(`Client disconnected: ${client.id}`);
   }
 
-  @SubscribeMessage('bitstampTradePrice')
-  bitstampTradePrice() {
-    this.bitstampSocket.on('trade', (data) => {
-      const latestPrice = data.data.price;
-      this.server.emit('bitstampTradePrice', { latestPrice });
+  @SubscribeMessage('getTradePrice')
+  getTradePrice(client: Socket, currencyPairs: any) {
+    this.socket.on('message', async (data) => {
+      const message = JSON.parse(data);
+      if (message.data.price) {
+        const parts = message.channel.split('_');
+        if (parts[2] !== currencyPairs) {
+          return;
+        }
+        const ohlc = await this.bitstampService.setOHLC(
+          parts[2],
+          message.data.price,
+        );
+        this.server.emit('getTradePrice', {
+          currencyPairs: parts[2],
+          price: message.data.price,
+          ohlc,
+        });
+      }
     });
+    return;
   }
 }
