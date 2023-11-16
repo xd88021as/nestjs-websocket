@@ -6,7 +6,6 @@ import {
   OnGatewayInit,
   SubscribeMessage,
 } from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
 import { BitstampService } from 'src/bitstamp/bitstamp.service';
 import * as WebSocket from 'ws';
 @WebSocketGateway({ namespace: '/streaming' })
@@ -14,25 +13,30 @@ export class WebsocketGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   @WebSocketServer()
-  private server: Server;
+  private server: WebSocket.Server;
   private socket: WebSocket;
+  private clientDataMap: Map<
+    string,
+    { ws: WebSocket; currencyPairs: string[] }
+  > = new Map();
+  private currencyPairs = [
+    'btcusd',
+    'btceur',
+    'ethusd',
+    'eurusd',
+    'gbpusd',
+    'ltcbtc',
+    'ltcusd',
+    'ltceur',
+    'ltcgbp',
+    'xrpusd',
+  ];
   constructor(private readonly bitstampService: BitstampService) {}
 
   afterInit() {
     this.socket = new WebSocket('wss://ws.bitstamp.net');
     this.socket.on('open', () => {
-      [
-        'btcusd',
-        'btceur',
-        'ethusd',
-        'eurusd',
-        'gbpusd',
-        'ltcbtc',
-        'ltcusd',
-        'ltceur',
-        'ltcgbp',
-        'xrpusd',
-      ].forEach((pair) => {
+      this.currencyPairs.forEach((pair) => {
         const subscribeMessage = {
           event: 'bts:subscribe',
           data: {
@@ -46,39 +50,68 @@ export class WebsocketGateway
       const message = JSON.parse(data);
       if (message.data.price) {
         const parts = message.channel.split('_');
-        await this.bitstampService.setOHLC(parts[2], message.data.price);
-      }
-    });
-  }
-
-  handleConnection(client: Socket) {
-    console.log(`Client connected: ${client.id}`);
-  }
-
-  handleDisconnect(client: Socket) {
-    console.log(`Client disconnected: ${client.id}`);
-  }
-
-  @SubscribeMessage('getTradePrice')
-  getTradePrice(client: Socket, currencyPairs: any) {
-    this.socket.on('message', async (data) => {
-      const message = JSON.parse(data);
-      if (message.data.price) {
-        const parts = message.channel.split('_');
-        if (parts[2] !== currencyPairs) {
-          return;
-        }
         const ohlc = await this.bitstampService.setOHLC(
           parts[2],
           message.data.price,
         );
-        this.server.emit('getTradePrice', {
-          currencyPairs: parts[2],
-          price: message.data.price,
-          ohlc,
+        this.clientDataMap.forEach((value, key) => {
+          if (
+            value.currencyPairs.find(
+              (currencyPair) => currencyPair === parts[2],
+            )
+          ) {
+            value.ws.send({
+              currencyPairs: parts[2],
+              price: message.data.price,
+              ohlc,
+            });
+          }
         });
       }
     });
-    return;
+  }
+
+  handleConnection(client: WebSocket) {
+    console.log(`Client connected`);
+    this.clientDataMap.set(client.conn.remoteAddress, {
+      ws: client,
+      currencyPairs: [],
+    });
+  }
+
+  handleDisconnect(client: WebSocket) {
+    console.log(`Client disconnected`);
+    this.clientDataMap.delete(client.conn.remoteAddress);
+  }
+
+  @SubscribeMessage('subscribeCurrencyPairs')
+  subscribeCurrencyPairs(client: WebSocket, currencyPairs: string) {
+    if (
+      !this.currencyPairs.find((currencyPair) => currencyPair === currencyPairs)
+    ) {
+      return;
+    }
+    const clientData = this.clientDataMap.get(client.conn.remoteAddress);
+    if (
+      clientData.currencyPairs.find(
+        (currencyPair) => currencyPair === currencyPairs,
+      )
+    ) {
+      return;
+    }
+    clientData.currencyPairs.push(currencyPairs);
+  }
+
+  @SubscribeMessage('unsubscribeCurrencyPairs')
+  unsubscribeCurrencyPairs(client: WebSocket, currencyPairs: string) {
+    if (
+      !this.currencyPairs.find((currencyPair) => currencyPair === currencyPairs)
+    ) {
+      return;
+    }
+    const clientData = this.clientDataMap.get(client.conn.remoteAddress);
+    clientData.currencyPairs.filter(
+      (currencyPair) => currencyPair !== currencyPairs,
+    );
   }
 }
